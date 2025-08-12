@@ -5,6 +5,7 @@ from ..page_view import PageView
 from ...core.doc_manager import DocumentManager
 
 _HANDLE_SIZE = 6
+_MOVE_BAR_H = 10
 
 class TextTool:
     """
@@ -154,22 +155,26 @@ class TextTool:
         if not self._page_rect:
             return
         self._editing = True
-        # Crear rectángulo principal y handles + text widget
+        # Rect principal
         self._rect_id = self.page_view.canvas.create_rectangle(0,0,0,0,
                                                                outline='orange', width=2)
+        # Barra de movimiento (handle superior)
+        self._move_handle_id = self.page_view.canvas.create_rectangle(0,0,0,0,
+                                                                      fill='#ffb347',
+                                                                      outline='orange')
+        # Handles esquinas
         self._handle_ids = []
         for _ in range(4):
             hid = self.page_view.canvas.create_rectangle(0,0,0,0,
                                                          outline='orange', fill='orange')
             self._handle_ids.append(hid)
-        # Text widget
+
         fontname, size, color_rgb, _erase = self.get_style()
-        # Para preview usamos familia base (Tk no entiende sufijos PDF exactos)
         tk_family = 'Helvetica'
         if fontname.startswith('times'): tk_family = 'Times'
         elif fontname.startswith('cour'): tk_family = 'Courier'
         weight = 'bold' if 'bold' in fontname else 'normal'
-        slant = 'italic' if 'italic' in fontname or 'oblique' in fontname else 'roman'
+        slant = 'italic' if ('italic' in fontname or 'oblique' in fontname) else 'roman'
         tkfont_obj = tkfont.Font(family=tk_family, size=size, weight=weight, slant=slant)
 
         self._text_widget = tk.Text(self.page_view.canvas, wrap='word',
@@ -180,10 +185,21 @@ class TextTool:
         self._text_window_id = self.page_view.canvas.create_window(0,0,
                                                                    anchor='nw',
                                                                    window=self._text_widget)
-        # Bindings de texto
+
+        # Bindings texto (commit / cancel)
         self._text_widget.bind('<Return>', self._on_commit_key)
         self._text_widget.bind('<Control-Return>', self._on_commit_key)
         self._text_widget.bind('<Escape>', self._on_cancel_key)
+        # Movimiento con Alt dentro del texto
+        self._text_widget.bind('<Alt-Button-1>', self._tw_move_start)
+        self._text_widget.bind('<Alt-B1-Motion>', self._tw_move_drag)
+        self._text_widget.bind('<Alt-ButtonRelease-1>', self._tw_move_end)
+
+        # Bindings barra de movimiento
+        c = self.page_view.canvas
+        c.tag_bind(self._move_handle_id, '<Button-1>', self._on_move_bar_down)
+        c.tag_bind(self._move_handle_id, '<B1-Motion>', self._on_move_bar_drag)
+        c.tag_bind(self._move_handle_id, '<ButtonRelease-1>', self._on_move_bar_up)
 
         self._reposition_overlay()
         self._text_widget.focus_set()
@@ -192,14 +208,15 @@ class TextTool:
         if not self._page_rect or not self._rect_id:
             return
         x0,y0,x1,y1 = self._page_rect
-        # Normalizar
         if x1 < x0: x0,x1 = x1,x0
         if y1 < y0: y0,y1 = y1,y0
-        # Convertir a canvas
         c0x, c0y = self.page_view.page_to_canvas(x0, y0)
         c1x, c1y = self.page_view.page_to_canvas(x1, y1)
-        self.page_view.canvas.coords(self._rect_id, c0x, c0y, c1x, c1y)
-        # Handles (TL, TR, BR, BL)
+        cvs = self.page_view.canvas
+        cvs.coords(self._rect_id, c0x, c0y, c1x, c1y)
+        # Barra movimiento (arriba dentro del rect)
+        cvs.coords(self._move_handle_id, c0x+1, c0y+1, c1x-1, c0y+1+_MOVE_BAR_H)
+        # Handles esquinas
         hs = _HANDLE_SIZE
         handles_pos = [
             (c0x-hs, c0y-hs, c0x+hs, c0y+hs),
@@ -208,17 +225,14 @@ class TextTool:
             (c0x-hs, c1y-hs, c0x+hs, c1y+hs),
         ]
         for hid, pos in zip(self._handle_ids, handles_pos):
-            self.page_view.canvas.coords(hid, *pos)
-        # Text widget ajustado al interior con padding
+            cvs.coords(hid, *pos)
+        # Text widget (debajo de barra + padding)
         pad = 4
-        self.page_view.canvas.coords(self._text_window_id, c0x+pad, c0y+pad)
+        text_top = c0y + _MOVE_BAR_H + pad
+        cvs.coords(self._text_window_id, c0x+pad, text_top)
         width_px = max(10, (c1x - c0x) - 2*pad)
-        height_px = max(10, (c1y - c0y) - 2*pad)
-        # Ajustar tamaño widget (usar place geometry vs config no directo, truco: width/height en chars/lines)
-        # Para mantener proporcional: estimar chars = width_px / (font_size*0.6)
+        height_px = max(10, (c1y - text_top) - pad)
         if self._text_widget:
-            font_size = self._text_widget['font']
-            # Ajuste aproximado: chars y líneas
             chars = max(5, int(width_px / 7))
             lines = max(1, int(height_px / 18))
             self._text_widget.config(width=chars, height=lines)
@@ -227,6 +241,9 @@ class TextTool:
         if self._rect_id:
             self.page_view.canvas.delete(self._rect_id)
             self._rect_id = None
+        if hasattr(self, '_move_handle_id') and self._move_handle_id:
+            self.page_view.canvas.delete(self._move_handle_id)
+            self._move_handle_id = None
         for hid in self._handle_ids:
             self.page_view.canvas.delete(hid)
         self._handle_ids.clear()
@@ -239,19 +256,73 @@ class TextTool:
         self._editing = False
         self._page_rect = None
 
-    # ----- Interacciones -----
-    def _hit_handle(self, cx, cy):
+    # ----- Hit tests (añadido) -----
+    def _hit_handle(self, cx: float, cy: float):
+        """
+        Devuelve el índice del handle (0..3) si el punto canvas (cx,cy) cae dentro de uno.
+        """
         for idx, hid in enumerate(self._handle_ids):
-            x0,y0,x1,y1 = self.page_view.canvas.coords(hid)
+            try:
+                x0,y0,x1,y1 = self.page_view.canvas.coords(hid)
+            except Exception:
+                continue
             if x0 <= cx <= x1 and y0 <= cy <= y1:
                 return idx
         return None
 
-    def _hit_inside_rect(self, cx, cy):
+    def _hit_inside_rect(self, cx: float, cy: float):
+        """
+        True si el punto canvas está dentro del rect principal (excluyendo handles).
+        """
         if not self._rect_id:
             return False
         x0,y0,x1,y1 = self.page_view.canvas.coords(self._rect_id)
         return x0 <= cx <= x1 and y0 <= cy <= y1
+
+    # ----- Movimiento con barra -----
+    def _on_move_bar_down(self, event):
+        cx = self.page_view.canvas.canvasx(event.x)
+        cy = self.page_view.canvas.canvasy(event.y)
+        self._move_start_canvas = (cx, cy)
+
+    def _on_move_bar_drag(self, event):
+        if not (self._editing and self._page_rect and self._move_start_canvas):
+            return
+        cx = self.page_view.canvas.canvasx(event.x)
+        cy = self.page_view.canvas.canvasy(event.y)
+        dx = (cx - self._move_start_canvas[0]) / self.page_view.last_zoom_used
+        dy = (cy - self._move_start_canvas[1]) / self.page_view.last_zoom_used
+        x0,y0,x1,y1 = self._page_rect
+        self._page_rect = (x0+dx, y0+dy, x1+dx, y1+dy)
+        self._move_start_canvas = (cx, cy)
+        self._reposition_overlay()
+
+    def _on_move_bar_up(self, event):
+        self._move_start_canvas = None
+
+    # ----- Movimiento con Alt dentro del texto -----
+    def _tw_move_start(self, event):
+        cx = self.page_view.canvas.canvasx(event.x_root - self.page_view.canvas.winfo_rootx())
+        cy = self.page_view.canvas.canvasy(event.y_root - self.page_view.canvas.winfo_rooty())
+        self._move_start_canvas = (cx, cy)
+        return "break"
+
+    def _tw_move_drag(self, event):
+        if not (self._editing and self._page_rect and self._move_start_canvas):
+            return "break"
+        cx = self.page_view.canvas.canvasx(event.x_root - self.page_view.canvas.winfo_rootx())
+        cy = self.page_view.canvas.canvasy(event.y_root - self.page_view.canvas.winfo_rooty())
+        dx = (cx - self._move_start_canvas[0]) / self.page_view.last_zoom_used
+        dy = (cy - self._move_start_canvas[1]) / self.page_view.last_zoom_used
+        x0,y0,x1,y1 = self._page_rect
+        self._page_rect = (x0+dx, y0+dy, x1+dx, y1+dy)
+        self._move_start_canvas = (cx, cy)
+        self._reposition_overlay()
+        return "break"
+
+    def _tw_move_end(self, event):
+        self._move_start_canvas = None
+        return "break"
 
     # ----- Commit / Cancel -----
     def _on_commit_key(self, event):
