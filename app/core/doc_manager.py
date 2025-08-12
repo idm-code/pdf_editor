@@ -151,14 +151,34 @@ class DocumentManager:
         self._notify_history()
 
     def insert_blank_page(self, position: int, width: int = 595, height: int = 842):
+        """
+        Inserta una página en blanco usando la API correcta de pikepdf.
+        width/height en puntos PDF.
+        """
         if not self._pike_doc:
             return
-        # Crear página en blanco (A4 por defecto aproximadamente 595x842 puntos)
-        blank = pikepdf.Page(self._pike_doc, mediabox=(0, 0, width, height))
+        try:
+            from pikepdf import Page, Rectangle
+            blank = Page.new()
+            # Ajustar mediabox
+            try:
+                blank.mediabox = Rectangle(0, 0, width, height)
+            except Exception:
+                # Fallback si Rectangle no está disponible
+                blank.mediabox = [0, 0, width, height]
+        except Exception:
+            # Fallback absoluto: crear un PDF temporal con PyMuPDF y anexar su primera página
+            import fitz, io, pikepdf
+            tmp_doc = fitz.open()
+            tmp_doc.new_page(width=width, height=height)
+            buf = tmp_doc.tobytes()
+            tmp_pdf = pikepdf.Pdf.open(io.BytesIO(buf))
+            blank = tmp_pdf.pages[0]
+
         if position < 0 or position > len(self._pike_doc.pages):
             position = len(self._pike_doc.pages)
         self._pike_doc.pages.insert(position, blank)
-        self._rebuild_fitz()  # ya notifica
+        self._rebuild_fitz()  # reconstruye fitz y notifica historial
 
     def duplicate_page(self, index: int):
         if not self._pike_doc:
@@ -570,3 +590,47 @@ class DocumentManager:
             if f.font_name == internal_name:
                 return f.path
         return None
+
+    def add_image(self, page_index: int, rect, image_path: str) -> bool:
+        """
+        Inserta una imagen escalándola para caber en el rect (mantiene aspecto).
+        rect: (x0,y0,x1,y1) coords página.
+        """
+        if not (self._fitz_doc and self._pike_doc):
+            return False
+        if page_index < 0 or page_index >= self.page_count():
+            return False
+        x0,y0,x1,y1 = rect
+        if x1 < x0: x0,x1 = x1,x0
+        if y1 < y0: y0,y1 = y1,y0
+        if (x1-x0) <= 1 or (y1-y0) <= 1:
+            return False
+        # Cargar imagen para calcular ajuste
+        try:
+            from PIL import Image
+            with Image.open(image_path) as im:
+                iw, ih = im.size
+        except Exception:
+            return False
+        bw = x1 - x0
+        bh = y1 - y0
+        if iw == 0 or ih == 0:
+            return False
+        scale = min(bw/iw, bh/ih)
+        dw = iw * scale
+        dh = ih * scale
+        ox = x0 + (bw - dw)/2
+        oy = y0 + (bh - dh)/2
+        page = self._fitz_doc.load_page(page_index)
+        try:
+            with open(image_path, 'rb') as f:
+                img_bytes = f.read()
+            page.insert_image(fitz.Rect(ox, oy, ox+dw, oy+dh), stream=img_bytes)
+        except Exception:
+            return False
+        buf = io.BytesIO()
+        self._fitz_doc.save(buf)
+        buf.seek(0)
+        self._sync_from_fitz_bytes(buf)
+        self._notify_history()
+        return True

@@ -7,6 +7,7 @@ from .page_view import PageView
 from .menus import MenusBuilder
 from .tools.text_tool import TextTool
 from .tools.highlight_tool import HighlightTool
+from .tools.image_tool import ImageTool
 import tkinter.font as tkfont
 from ..core.font_manager import FontManager
 import os
@@ -58,6 +59,7 @@ class MainWindow(tk.Frame):
                                   self._collect_text_style, self._after_doc_change)
         self.highlight_tool = HighlightTool(self.page_view, self.doc,
                                             self._collect_highlight_style, self._after_doc_change)
+        self.image_tool = ImageTool(self.page_view, self.doc, self._after_doc_change)
         self.active_tool_name = 'text'
         self.page_view.set_tool(self.text_tool)
 
@@ -108,12 +110,16 @@ class MainWindow(tk.Frame):
                     pass
             if name == 'text':
                 self.page_view.set_tool(self.text_tool)
-            else:
+            elif name == 'highlight':
                 self.page_view.set_tool(self.highlight_tool)
+            else:
+                self.page_view.set_tool(self.image_tool)
             self.active_tool_name = name
         tk.Radiobutton(grp_tools, text='Texto', value='text', variable=self.tool_var,
                        command=change_tool).pack(side='left')
         tk.Radiobutton(grp_tools, text='Resaltar', value='highlight', variable=self.tool_var,
+                       command=change_tool).pack(side='left')
+        tk.Radiobutton(grp_tools, text='Imagen', value='image', variable=self.tool_var,
                        command=change_tool).pack(side='left')
 
         # Grupo texto
@@ -164,6 +170,15 @@ class MainWindow(tk.Frame):
         hl_sample.pack(side='left', padx=4)
 
         self._refresh_preview()
+        # --- Añadir botón para cargar imagen ---
+        def load_image():
+            path = filedialog.askopenfilename(filetypes=[('Imagen','*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff'),('Todos','*.*')])
+            if not path: return
+            if self.image_tool.load_image_path(path):
+                messagebox.showinfo('Imagen', 'Imagen cargada. Arrastra sobre la página.')
+            else:
+                messagebox.showerror('Error','No se pudo cargar la imagen.')
+        tk.Button(ribbon, text='Cargar imagen', command=load_image).pack(side='left', padx=6, pady=2)
 
     # ---------- Callbacks Menú / Acciones Documento ----------
     def open_pdf(self):

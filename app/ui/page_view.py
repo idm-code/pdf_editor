@@ -39,6 +39,8 @@ class PageView(tk.Frame):
         self.canvas.bind('<B1-Motion>', self._on_move)
         self.canvas.bind('<ButtonRelease-1>', self._on_up)
         self.canvas.bind('<Configure>', lambda e: self._maybe_refit())
+        self.canvas.bind('<KeyPress>', self._on_key)
+        self.canvas.focus_set()
 
     # Public API
     def set_page(self, index: int):
@@ -49,6 +51,8 @@ class PageView(tk.Frame):
         if self._tool:
             self._tool.deactivate()
         self._tool = tool
+        # Asegurar foco para capturar teclas (Enter / Esc)
+        self.canvas.focus_set()
         if self._tool:
             self._tool.on_page_rendered()
 
@@ -122,3 +126,7 @@ class PageView(tk.Frame):
         if self._tool: self._tool.on_mouse_move(e)
     def _on_up(self, e):
         if self._tool: self._tool.on_mouse_up(e)
+    def _on_key(self, e):
+        if self._tool and hasattr(self._tool, 'on_key'):
+            res = getattr(self._tool, 'on_key')(e)
+            return res
