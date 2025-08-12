@@ -351,18 +351,24 @@ class TextTool:
             return
         content = self._text_widget.get('1.0', 'end').rstrip()
         fontname, size, color_rgb, erase_bg, underline, underline_color = self.get_style()
-        # Si no hay contenido pero sí borrar fondo: permitir que se aplique para “tapar”
+        # Si no hay contenido y no se borra fondo -> nada
         if not content and not erase_bg:
             self._destroy_overlay()
             return
+        # Asegurar min size coherente con DocumentManager para que el primer commit no falle
+        x0,y0,x1,y1 = self._page_rect
+        min_w = max(10, size * 0.6)
+        min_h = max(12, size * 1.2)
+        if (x1 - x0) < min_w: x1 = x0 + min_w
+        if (y1 - y0) < min_h: y1 = y0 + min_h
+        self._page_rect = (x0,y0,x1,y1)  # actualizar (útil para underline / consistencia)
         r,g,b = color_rgb
         ur,ug,ub = underline_color
-        x0,y0,x1,y1 = self._page_rect
         try:
             ok = self.doc.add_text_box(
                 self.page_view.current_index,
                 (x0,y0,x1,y1),
-                content if content else " ",  # espacio para forzar stream y luego visual casi vacío
+                content,
                 font_size=size,
                 color=(r/255.0,g/255.0,b/255.0),
                 font_family=fontname,
@@ -372,11 +378,12 @@ class TextTool:
                 underline_color=(ur/255.0, ug/255.0, ub/255.0)
             )
         except Exception:
+            # Fallback helv
             try:
                 ok = self.doc.add_text_box(
                     self.page_view.current_index,
                     (x0,y0,x1,y1),
-                    content if content else " ",
+                    content,
                     font_size=size,
                     color=(r/255.0,g/255.0,b/255.0),
                     font_family='helv',

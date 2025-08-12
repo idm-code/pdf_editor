@@ -285,8 +285,8 @@ class DocumentManager:
                      underline: bool = False, underline_color=(0,0,0)) -> bool:
         """
         rect: (x0, y0, x1, y1) coords página.
-        Devuelve True si se colocó algo de texto. Hace fallback a insert_text
-        si insert_textbox no coloca nada.
+        Inserta texto dentro del rect. Devuelve True solo si realmente se dibuja algo
+        (texto o fondo borrado). Corrige lógica para detectar si insert_textbox colocó texto.
         """
         if not self._fitz_doc or not self._pike_doc:
             return False
@@ -299,85 +299,80 @@ class DocumentManager:
         pw, ph = page.rect.width, page.rect.height
         x0 = max(0, min(pw, x0)); x1 = max(0, min(pw, x1))
         y0 = max(0, min(ph, y0)); y1 = max(0, min(ph, y1))
-        # Asegurar tamaño mínimo para que quepa al menos una línea
         min_w = max(10, font_size * 0.6)
         min_h = max(12, font_size * 1.2)
         if (x1 - x0) < min_w: x1 = x0 + min_w
         if (y1 - y0) < min_h: y1 = y0 + min_h
         if (x1 - x0) <= 0 or (y1 - y0) <= 0:
             return False
+        placed_any = False
         if erase_background:
             page.draw_rect(fitz.Rect(x0,y0,x1,y1), color=None, fill=(1,1,1))
+            placed_any = True
 
-        # Preparar fontfile si es personalizada
-        fontfile = None
-        if not self._is_base14(font_family):
-            fontfile = self._fontfile_for(font_family)
-            if fontfile is None:
-                font_family = 'helv'  # fallback seguro
-
-        def _insert_box(fam, ffile):
-            return page.insert_textbox(
-                fitz.Rect(x0, y0, x1, y1),
-                text,
-                fontsize=font_size,
-                fontname=fam,
-                fontfile=ffile,
-                fill=color,
-                align=align
-            )
-
-        try:
-            leftover = _insert_box(font_family, fontfile)
-        except Exception:
-            # fallback duro
-            font_family = 'helv'
-            leftover = _insert_box('helv', None)
-
-        placed_with_box = (text.strip() != "")
-        if leftover == text and text.strip():
-            # El textbox no pudo colocar nada; fallback línea a línea
-            lines = text.splitlines()
-            cur_y = y0 + font_size
-            line_gap = font_size * 1.15
-            for line in lines:
-                if cur_y > y1: break
-                if not line and len(lines) > 1:
+        text_clean = text.rstrip('\n')
+        if text_clean:
+            # Preparar fontfile si es personalizada
+            fontfile = None
+            if not self._is_base14(font_family):
+                fontfile = self._fontfile_for(font_family)
+                if fontfile is None:
+                    font_family = 'helv'
+            def _insert_box(fam, ffile):
+                return page.insert_textbox(
+                    fitz.Rect(x0, y0, x1, y1),
+                    text_clean,
+                    fontsize=font_size,
+                    fontname=fam,
+                    fontfile=ffile,
+                    fill=color,
+                    align=align
+                )
+            try:
+                leftover = _insert_box(font_family, fontfile)
+            except Exception:
+                leftover = _insert_box('helv', None)
+            # Si leftover != texto original => se colocó algo
+            if leftover != text_clean:
+                placed_any = True
+            else:
+                # Fallback línea a línea
+                lines = text_clean.splitlines()
+                cur_y = y0 + font_size
+                line_gap = font_size * 1.15
+                for line in lines:
+                    if cur_y > y1: break
+                    try:
+                        page.insert_text(
+                            fitz.Point(x0, cur_y),
+                            line if line else " ",
+                            fontsize=font_size,
+                            fontname=font_family,
+                            fontfile=fontfile if fontfile and font_family != 'helv' else None,
+                            fill=color
+                        )
+                        placed_any = True
+                    except Exception:
+                        page.insert_text(
+                            fitz.Point(x0, cur_y),
+                            line if line else " ",
+                            fontsize=font_size,
+                            fontname='helv',
+                            fill=color
+                        )
+                        placed_any = True
                     cur_y += line_gap
-                    continue
-                try:
-                    page.insert_text(
-                        fitz.Point(x0, cur_y),
-                        line if line else " ",
-                        fontsize=font_size,
-                        fontname=font_family,
-                        fontfile=fontfile if fontfile and font_family != 'helv' else None,
-                        fill=color
-                    )
-                except Exception:
-                    page.insert_text(
-                        fitz.Point(x0, cur_y),
-                        line if line else " ",
-                        fontsize=font_size,
-                        fontname='helv',
-                        fill=color
-                    )
-                cur_y += line_gap
-
-        if underline and text.strip():
-            uy = y1 - 2
-            page.draw_line(fitz.Point(x0 + 2, uy), fitz.Point(x1 - 2, uy),
-                           color=underline_color, width=0.8)
-
-        # Guardar siempre que haya borrado fondo o texto (para que se vea la acción)
-        if erase_background or text.strip():
+            if underline and placed_any:
+                uy = y1 - 2
+                page.draw_line(fitz.Point(x0 + 2, uy), fitz.Point(x1 - 2, uy),
+                               color=underline_color, width=0.8)
+        if placed_any:
             buf = io.BytesIO()
             self._fitz_doc.save(buf)
             buf.seek(0)
             self._sync_from_fitz_bytes(buf)
             self._notify_history()
-            return True
-        return False
+        return placed_any
 
     def redact_rect(self, page_index: int, rect, fill=(1,1,1)):
         if not self._fitz_doc or not self._pike_doc:
