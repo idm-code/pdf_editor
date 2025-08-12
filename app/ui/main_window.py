@@ -5,6 +5,7 @@ from ..core.doc_manager import DocumentManager
 from .page_view import PageView
 from .menus import MenusBuilder
 from .tools.text_tool import TextTool
+from .tools.highlight_tool import HighlightTool
 import tkinter.font as tkfont
 
 class MainWindow(tk.Frame):
@@ -17,25 +18,46 @@ class MainWindow(tk.Frame):
         self.doc = DocumentManager()
         self.pack(fill='both', expand=True)
 
-        # Layout principal
+        self.rowconfigure(1, weight=1)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(0, weight=1)
 
+        # Panel miniaturas y vista (fila 1)
         self.thumb_panel = ThumbnailPanel(self, on_select=self._on_select_page)
-        self.thumb_panel.grid(row=0, column=0, sticky='ns')
-
+        self.thumb_panel.grid(row=1, column=0, sticky='ns')
         self.page_view = PageView(self, self._get_pixmap, self._page_count)
-        self.page_view.grid(row=0, column=1, sticky='nsew')
+        self.page_view.grid(row=1, column=1, sticky='nsew')
+
+        # Inicializar atributos de estilo (usados por ribbon)
+        self.font_family_var = tk.StringVar(value='Helvetica')
+        self.font_size_var = tk.IntVar(value=14)
+        self.bold_var = tk.BooleanVar(value=False)
+        self.italic_var = tk.BooleanVar(value=False)
+        self.erase_var = tk.BooleanVar(value=False)
+        self.color_rgb = (0,0,0)
+        self.underline_var = tk.BooleanVar(value=False)
+        self.underline_color_rgb = (0,0,0)
+
+        # Highlight estado
+        self.highlight_color_rgb = (255, 255, 0)
+        self.highlight_opacity = tk.DoubleVar(value=0.35)
+
+        # Tools
+        self.text_tool = TextTool(self.page_view, self.doc,
+                                  self._collect_text_style, self._after_doc_change)
+        self.highlight_tool = HighlightTool(self.page_view, self.doc,
+                                            self._collect_highlight_style, self._after_doc_change)
+        self.active_tool_name = 'text'
+        self.page_view.set_tool(self.text_tool)
+
+        # Ribbon después de tener tools
+        self._build_ribbon()
 
         # Zoom scale
         self.zoom_var = tk.DoubleVar(value=self.page_view.zoom * 100)
         self.zoom_scale = tk.Scale(self, from_=10, to=400, orient='horizontal',
                                    variable=self.zoom_var, command=self._on_zoom_scale,
                                    label='Zoom (%)')
-        self.zoom_scale.grid(row=1, column=0, columnspan=2, sticky='ew')
-
-        # Barra de estilo texto
-        self._build_text_style_bar()
+        self.zoom_scale.grid(row=2, column=0, columnspan=2, sticky='ew')
 
         # Menús
         MenusBuilder(self.master).build(
@@ -45,41 +67,87 @@ class MainWindow(tk.Frame):
             lambda: self._zoom_btn(1.25), lambda: self._zoom_btn(0.8),
             self._zoom_reset, self._fit_width,
             lambda: self._rotate(90), lambda: self._rotate(-90),
-            lambda: self._move_page(-1), lambda: self._move_page(1),
-            self.activate_text_tool, self.deactivate_tool
+            lambda: self._move_page(-1), lambda: self._move_page(1)
         )
 
-        # Wheel bindings
+        # Wheel
         self.page_view.canvas.bind('<MouseWheel>', self._on_wheel)
         self.page_view.canvas.bind('<Control-MouseWheel>', self._on_wheel_ctrl)
 
-        # Estado herramienta
-        self.active_tool = None
+    # ---------- Ribbon ----------
+    def _build_ribbon(self):
+        ribbon = tk.Frame(self, bd=1, relief='groove', bg='#f2f2f2')
+        ribbon.grid(row=0, column=0, columnspan=2, sticky='ew')
+        # Grupo herramientas (selector)
+        grp_tools = tk.LabelFrame(ribbon, text='Herramientas', padx=4, pady=2)
+        grp_tools.pack(side='left', padx=4, pady=2)
+        self.tool_var = tk.StringVar(value=self.active_tool_name)
+        def change_tool():
+            name = self.tool_var.get()
+            if name == self.active_tool_name:
+                return
+            # Commit texto actual antes de cambiar
+            if self.active_tool_name == 'text':
+                # commit implícito sólo si está editando y hay contenido
+                try:
+                    self.text_tool._commit_to_pdf()
+                except:
+                    pass
+            if name == 'text':
+                self.page_view.set_tool(self.text_tool)
+            else:
+                self.page_view.set_tool(self.highlight_tool)
+            self.active_tool_name = name
+        tk.Radiobutton(grp_tools, text='Texto', value='text', variable=self.tool_var,
+                       command=change_tool).pack(side='left')
+        tk.Radiobutton(grp_tools, text='Resaltar', value='highlight', variable=self.tool_var,
+                       command=change_tool).pack(side='left')
 
-    # ---------- Construcción UI ----------
-    def _build_text_style_bar(self):
-        bar = tk.Frame(self)
-        bar.grid(row=2, column=0, columnspan=2, sticky='ew', pady=2)
-        self.font_family_var = tk.StringVar(value='Helvetica')
-        self.font_size_var = tk.IntVar(value=14)
-        self.bold_var = tk.BooleanVar(value=False)
-        self.italic_var = tk.BooleanVar(value=False)
-        self.erase_var = tk.BooleanVar(value=False)
-        self.color_rgb = (0,0,0)
+        # Grupo texto
+        group_text = tk.LabelFrame(ribbon, text='Texto', padx=4, pady=2)
+        group_text.pack(side='left', padx=4, pady=2)
 
-        tk.Label(bar, text='Fuente:').pack(side='left')
-        tk.OptionMenu(bar, self.font_family_var, 'Helvetica','Times','Courier').pack(side='left')
-        tk.Label(bar, text='Tam:').pack(side='left')
-        tk.Spinbox(bar, from_=6, to=200, width=4, textvariable=self.font_size_var).pack(side='left')
-        tk.Checkbutton(bar, text='N', variable=self.bold_var, command=self._refresh_preview).pack(side='left')
-        tk.Checkbutton(bar, text='I', variable=self.italic_var, command=self._refresh_preview).pack(side='left')
-        tk.Checkbutton(bar, text='Borrar fondo', variable=self.erase_var).pack(side='left')
-        tk.Button(bar, text='Color', command=self._choose_color).pack(side='left')
-        self.font_preview = tk.Label(bar, text='Aa')
+        def style_changed(*_):
+            self._refresh_preview()
+            self.text_tool.refresh_style()
+
+        tk.Label(group_text, text='Fuente:').pack(side='left')
+        tk.OptionMenu(group_text, self.font_family_var, 'Helvetica','Times','Courier',
+                      command=lambda *_: style_changed()).pack(side='left')
+        tk.Label(group_text, text='Tam:').pack(side='left')
+        tk.Spinbox(group_text, from_=6, to=200, width=4, textvariable=self.font_size_var,
+                   command=style_changed).pack(side='left')
+        tk.Checkbutton(group_text, text='N', variable=self.bold_var,
+                       command=style_changed).pack(side='left')
+        tk.Checkbutton(group_text, text='I', variable=self.italic_var,
+                       command=style_changed).pack(side='left')
+        tk.Checkbutton(group_text, text='Subr', variable=self.underline_var,
+                       command=style_changed).pack(side='left')
+        tk.Button(group_text, text='Color', command=self._choose_color).pack(side='left')
+        tk.Button(group_text, text='Color subr', command=self._choose_underline_color).pack(side='left')
+        tk.Checkbutton(group_text, text='Borrar fondo', variable=self.erase_var).pack(side='left')
+        self.font_preview = tk.Label(group_text, text='Aa', bd=1, relief='sunken', padx=4)
         self.font_preview.pack(side='left', padx=6)
-        self.text_bar = bar
+
+        # Grupo resaltado
+        grp_hl = tk.LabelFrame(ribbon, text='Resaltado', padx=4, pady=2)
+        grp_hl.pack(side='left', padx=4, pady=2)
+
+        def pick_hl_color():
+            c = colorchooser.askcolor(color=f'#{self.highlight_color_rgb[0]:02x}{self.highlight_color_rgb[1]:02x}{self.highlight_color_rgb[2]:02x}')
+            if c and c[0]:
+                r,g,b = map(int,c[0])
+                self.highlight_color_rgb = (r,g,b)
+                hl_sample.config(bg=f'#{r:02x}{g:02x}{b:02x}')
+        tk.Button(grp_hl, text='Color', command=pick_hl_color).pack(side='left')
+        tk.Label(grp_hl, text='Opac:').pack(side='left')
+        tk.Scale(grp_hl, from_=0.1, to=0.9, resolution=0.05, orient='horizontal',
+                 variable=self.highlight_opacity, length=120).pack(side='left')
+        hl_sample = tk.Label(grp_hl, width=2, relief='sunken',
+                             bg=f'#{self.highlight_color_rgb[0]:02x}{self.highlight_color_rgb[1]:02x}{self.highlight_color_rgb[2]:02x}')
+        hl_sample.pack(side='left', padx=4)
+
         self._refresh_preview()
-        self.text_bar.grid_remove()  # oculto hasta activar herramienta
 
     # ---------- Callbacks Menú / Acciones Documento ----------
     def open_pdf(self):
@@ -218,74 +286,6 @@ class MainWindow(tk.Frame):
         if abs(self.zoom_var.get()-target)>0.1:
             self.zoom_var.set(target)
 
-    # ---------- Herramienta texto ----------
-    def activate_text_tool(self):
-        if self.active_tool:
-            self.deactivate_tool()
-        self.text_bar.grid()
-        self.active_tool = TextTool(
-            self.page_view,
-            self.doc,
-            self._collect_text_style,
-            self._after_doc_change
-        )
-        self.page_view.set_tool(self.active_tool)
-
-    def deactivate_tool(self):
-        if self.active_tool:
-            self.page_view.set_tool(None)
-            self.active_tool = None
-        self.text_bar.grid_remove()
-
-    def _collect_text_style(self):
-        base_map = {'Helvetica':'helv','Times':'times','Courier':'cour'}
-        base = base_map.get(self.font_family_var.get(),'helv')
-        bold = self.bold_var.get()
-        italic = self.italic_var.get()
-        style = ''
-        if base == 'helv':
-            if bold and italic: style='-boldoblique'
-            elif bold: style='-bold'
-            elif italic: style='-oblique'
-        elif base == 'times':
-            if bold and italic: style='-bolditalic'
-            elif bold: style='-bold'
-            elif italic: style='-italic'
-        elif base == 'cour':
-            if bold and italic: style='-boldoblique'
-            elif bold: style='-bold'
-            elif italic: style='-oblique'
-        fontname = base + style
-        return fontname, self.font_size_var.get(), self.color_rgb, self.erase_var.get()
-
-    def _after_doc_change(self):
-        self.page_view.render()
-        self._refresh_thumbs()
-
-    def _refresh_preview(self):
-        f = tkfont.Font(family=self.font_family_var.get(),
-                        size=self.font_size_var.get(),
-                        weight='bold' if self.bold_var.get() else 'normal',
-                        slant='italic' if self.italic_var.get() else 'roman')
-        r,g,b = self.color_rgb
-        self.font_preview.config(font=f, fg=f'#{r:02x}{g:02x}{b:02x}')
-
-    def _choose_color(self):
-        c = colorchooser.askcolor(color='#000000')
-        if c and c[0]:
-            r,g,b = map(int,c[0])
-            self.color_rgb = (r,g,b)
-            self._refresh_preview()
-
-    # ---------- Eventos wheel ----------
-    def _on_wheel(self, e):
-        if self.page_view.canvas.yview() == (0.0,1.0): return
-        self.page_view.scroll_wheel(-1 if e.delta>0 else 1)
-
-    def _on_wheel_ctrl(self, e):
-        self.page_view.scroll_wheel_ctrl(e.delta>0)
-        self._sync_zoom_scale()
-
     # ---------- Helpers internos ----------
     def _get_pixmap(self, index, zoom):
         return self.doc.get_page_pixmap(index, zoom)
@@ -311,3 +311,78 @@ class MainWindow(tk.Frame):
     def _on_select_page(self, index: int):
         self.page_view.set_page(index)
         self.thumb_panel.select(index)
+
+    # ---------- Eventos wheel ----------
+    def _on_wheel(self, e):
+        if self.page_view.canvas.yview() == (0.0,1.0): return
+        self.page_view.scroll_wheel(-1 if e.delta>0 else 1)
+
+    def _on_wheel_ctrl(self, e):
+        self.page_view.scroll_wheel_ctrl(e.delta>0)
+        self._sync_zoom_scale()
+
+    # --- Añadir este método (faltaba) ---
+    def _after_doc_change(self):
+        """
+        Re-renderiza la página actual tras un cambio (añadir texto, etc.)
+        y refresca las miniaturas para reflejar el estado actualizado.
+        """
+        self.page_view.render()
+        self._refresh_thumbs()
+
+    # ---------- Text style collection ----------
+    def _collect_text_style(self):
+        base_map = {'Helvetica':'helv','Times':'times','Courier':'cour'}
+        base = base_map.get(self.font_family_var.get(),'helv')
+        bold = self.bold_var.get()
+        italic = self.italic_var.get()
+        style = ''
+        if base == 'helv':
+            if bold and italic: style='-boldoblique'
+            elif bold: style='-bold'
+            elif italic: style='-oblique'
+        elif base == 'times':
+            if bold and italic: style='-bolditalic'
+            elif bold: style='-bold'
+            elif italic: style='-italic'
+        elif base == 'cour':
+            if bold and italic: style='-boldoblique'
+            elif bold: style='-bold'
+            elif italic: style='-oblique'
+        fontname = base + style
+        return (fontname,
+                self.font_size_var.get(),
+                self.color_rgb,
+                self.erase_var.get(),
+                self.underline_var.get(),
+                self.underline_color_rgb)
+
+    def _refresh_preview(self):
+        f = tkfont.Font(family=self.font_family_var.get(),
+                        size=self.font_size_var.get(),
+                        weight='bold' if self.bold_var.get() else 'normal',
+                        slant='italic' if self.italic_var.get() else 'roman')
+        r,g,b = self.color_rgb
+        self.font_preview.config(font=f, fg=f'#{r:02x}{g:02x}{b:02x}')
+        self.font_preview.config(underline=1 if self.underline_var.get() else 0)
+
+    def _choose_color(self):
+        c = colorchooser.askcolor(color=f'#{self.color_rgb[0]:02x}{self.color_rgb[1]:02x}{self.color_rgb[2]:02x}')
+        if c and c[0]:
+            r,g,b = map(int,c[0])
+            self.color_rgb = (r,g,b)
+            self._refresh_preview()
+            if hasattr(self, 'text_tool'):
+                self.text_tool.refresh_style()
+
+    def _choose_underline_color(self):
+        c = colorchooser.askcolor(color=f'#{self.underline_color_rgb[0]:02x}{self.underline_color_rgb[1]:02x}{self.underline_color_rgb[2]:02x}')
+        if c and c[0]:
+            r,g,b = map(int,c[0])
+            self.underline_color_rgb = (r,g,b)
+            # Se aplica sólo al commit final
+            if hasattr(self, 'text_tool'):
+                self.text_tool.refresh_style()
+
+    def _collect_highlight_style(self):
+        return (self.highlight_color_rgb, self.highlight_opacity.get())

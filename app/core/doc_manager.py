@@ -236,9 +236,12 @@ class DocumentManager:
 
     def add_text_box(self, page_index: int, rect, text: str,
                      font_size: int = 14, color=(0,0,0), font_family: str = "helv",
-                     align: int = 0, erase_background: bool = False) -> bool:
+                     align: int = 0, erase_background: bool = False,
+                     underline: bool = False, underline_color=(0,0,0)) -> bool:
         """
-        rect: (x0, y0, x1, y1) coordenadas página
+        rect: (x0, y0, x1, y1) coords página.
+        Devuelve True si se colocó algo de texto. Hace fallback a insert_text
+        si insert_textbox no coloca nada.
         """
         if not self._fitz_doc or not self._pike_doc:
             return False
@@ -247,11 +250,15 @@ class DocumentManager:
         x0, y0, x1, y1 = rect
         if x1 < x0: x0, x1 = x1, x0
         if y1 < y0: y0, y1 = y1, y0
-        # Recortar a página
         page = self._fitz_doc.load_page(page_index)
         pw, ph = page.rect.width, page.rect.height
         x0 = max(0, min(pw, x0)); x1 = max(0, min(pw, x1))
         y0 = max(0, min(ph, y0)); y1 = max(0, min(ph, y1))
+        # Asegurar tamaño mínimo para que quepa al menos una línea
+        min_w = max(10, font_size * 0.6)
+        min_h = max(12, font_size * 1.2)
+        if (x1 - x0) < min_w: x1 = x0 + min_w
+        if (y1 - y0) < min_h: y1 = y0 + min_h
         if (x1 - x0) <= 0 or (y1 - y0) <= 0:
             return False
         if erase_background:
@@ -264,13 +271,37 @@ class DocumentManager:
             fill=color,
             align=align
         )
-        placed = (leftover != text) or (text.strip() != "")
-        if placed:
+        placed_with_box = (leftover != text)
+        # Fallback: si nada cupo, escribir línea a línea simple
+        if not placed_with_box:
+            # Insertar cada línea iniciando en la parte superior
+            cur_y = y0 + font_size
+            line_gap = font_size * 1.15
+            for line in text.splitlines():
+                if not line.strip():
+                    cur_y += line_gap
+                    continue
+                if cur_y > y1:
+                    break
+                page.insert_text(
+                    fitz.Point(x0, cur_y),
+                    line,
+                    fontsize=font_size,
+                    fontname=font_family,
+                    fill=color
+                )
+                cur_y += line_gap
+            placed_with_box = True
+        if placed_with_box and underline:
+            uy = y1 - 2
+            page.draw_line(fitz.Point(x0 + 2, uy), fitz.Point(x1 - 2, uy),
+                           color=underline_color, width=0.8)
+        if placed_with_box:
             buf = io.BytesIO()
             self._fitz_doc.save(buf)
             buf.seek(0)
             self._sync_from_fitz_bytes(buf)
-        return placed
+        return placed_with_box
 
     def redact_rect(self, page_index: int, rect, fill=(1,1,1)):
         if not self._fitz_doc or not self._pike_doc:
@@ -380,6 +411,36 @@ class DocumentManager:
         if not annot:
             return False
         page.delete_annot(annot)
+        buf = io.BytesIO()
+        self._fitz_doc.save(buf)
+        buf.seek(0)
+        self._sync_from_fitz_bytes(buf)
+        return True
+
+    def add_highlight_rect(self, page_index: int, rect, color_rgb=(255,255,0), opacity: float = 0.35) -> bool:
+        """
+        Crea un rectángulo de resaltado semitransparente sin borde visible.
+        """
+        if not self._fitz_doc or not self._pike_doc:
+            return False
+        if page_index < 0 or page_index >= self.page_count():
+            return False
+        x0,y0,x1,y1 = rect
+        if x1 < x0: x0,x1 = x1,x0
+        if y1 < y0: y0,y1 = y1,y0
+        if (x1 - x0) <= 0 or (y1 - y0) <= 0:
+            return False
+        page = self._fitz_doc.load_page(page_index)
+        r,g,b = (c/255.0 for c in color_rgb)
+        annot = page.add_rect_annot(fitz.Rect(x0,y0,x1,y1))
+        annot.set_colors(stroke=None, fill=(r,g,b))
+        annot.set_opacity(max(0.05, min(1.0, opacity)))
+        # Eliminar borde (width=0 y sin dash)
+        try:
+            annot.set_border(width=0, dashes=[])
+        except:
+            pass
+        annot.update()
         buf = io.BytesIO()
         self._fitz_doc.save(buf)
         buf.seek(0)

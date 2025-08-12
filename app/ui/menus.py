@@ -2,7 +2,7 @@ import tkinter as tk
 
 class MenusBuilder:
     """
-    Construye menús y conecta callbacks (inyección de dependencias).
+    Construye menús y conecta callbacks (sin menú de herramientas ahora).
     """
     def __init__(self, master: tk.Tk):
         self.master = master
@@ -12,8 +12,7 @@ class MenusBuilder:
               on_delete_page, on_duplicate, on_insert_blank,
               on_replace_page, on_extract_page, on_export_img,
               on_zoom_in, on_zoom_out, on_zoom_reset, on_fit_width,
-              on_rotate_cw, on_rotate_ccw, on_move_up, on_move_down,
-              on_activate_text_tool, on_deactivate_tool):
+              on_rotate_cw, on_rotate_ccw, on_move_up, on_move_down):
         menubar = tk.Menu(self.master)
 
         file_menu = tk.Menu(menubar, tearoff=0)
@@ -51,10 +50,5 @@ class MenusBuilder:
         page_menu.add_command(label='Subir página', command=on_move_up)
         page_menu.add_command(label='Bajar página', command=on_move_down)
         menubar.add_cascade(label='Página', menu=page_menu)
-
-        tools_menu = tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label='Herramienta Texto', command=on_activate_text_tool)
-        tools_menu.add_command(label='Desactivar herramienta', command=on_deactivate_tool)
-        menubar.add_cascade(label='Herramientas', menu=tools_menu)
 
         self.master.config(menu=menubar)

@@ -12,10 +12,10 @@ class TextTool:
     Edición de texto en vivo:
     - Arrastrar para crear rect.
     - Texto editable sobre canvas (tk.Text).
-    - Mover arrastrando interior.
-    - Redimensionar arrastrando esquinas.
+    - Mover / redimensionar.
     - Enter / Ctrl+Enter: commit a PDF.
     - Esc: cancelar.
+    get_style() ahora devuelve: (fontname, size, color_rgb, erase_bg, underline, underline_color)
     """
     def __init__(self, page_view: PageView, doc: DocumentManager,
                  get_style, notify_refresh):
@@ -155,21 +155,18 @@ class TextTool:
         if not self._page_rect:
             return
         self._editing = True
-        # Rect principal
         self._rect_id = self.page_view.canvas.create_rectangle(0,0,0,0,
                                                                outline='orange', width=2)
-        # Barra de movimiento (handle superior)
         self._move_handle_id = self.page_view.canvas.create_rectangle(0,0,0,0,
                                                                       fill='#ffb347',
                                                                       outline='orange')
-        # Handles esquinas
         self._handle_ids = []
         for _ in range(4):
             hid = self.page_view.canvas.create_rectangle(0,0,0,0,
                                                          outline='orange', fill='orange')
             self._handle_ids.append(hid)
 
-        fontname, size, color_rgb, _erase = self.get_style()
+        fontname, size, color_rgb, _erase_bg, underline, underline_color = self.get_style()
         tk_family = 'Helvetica'
         if fontname.startswith('times'): tk_family = 'Times'
         elif fontname.startswith('cour'): tk_family = 'Courier'
@@ -177,25 +174,34 @@ class TextTool:
         slant = 'italic' if ('italic' in fontname or 'oblique' in fontname) else 'roman'
         tkfont_obj = tkfont.Font(family=tk_family, size=size, weight=weight, slant=slant)
 
-        self._text_widget = tk.Text(self.page_view.canvas, wrap='word',
+        bg_color = 'white' if _erase_bg else self.page_view.canvas['bg']
+
+        self._text_widget = tk.Text(self.page_view.canvas,
+                                    wrap='word',
                                     font=tkfont_obj,
-                                    bd=0, highlightthickness=0)
+                                    bd=0,
+                                    highlightthickness=0,
+                                    width=1,
+                                    height=1,
+                                    spacing1=0, spacing2=0, spacing3=0,
+                                    bg=bg_color)
         r,g,b = color_rgb
         self._text_widget.configure(fg=f'#{r:02x}{g:02x}{b:02x}')
+        if underline:
+            self._text_widget.tag_configure('ul', underline=1)
+            self._text_widget.tag_add('ul','1.0','end')
+
         self._text_window_id = self.page_view.canvas.create_window(0,0,
                                                                    anchor='nw',
                                                                    window=self._text_widget)
 
-        # Bindings texto (commit / cancel)
         self._text_widget.bind('<Return>', self._on_commit_key)
         self._text_widget.bind('<Control-Return>', self._on_commit_key)
         self._text_widget.bind('<Escape>', self._on_cancel_key)
-        # Movimiento con Alt dentro del texto
         self._text_widget.bind('<Alt-Button-1>', self._tw_move_start)
         self._text_widget.bind('<Alt-B1-Motion>', self._tw_move_drag)
         self._text_widget.bind('<Alt-ButtonRelease-1>', self._tw_move_end)
 
-        # Bindings barra de movimiento
         c = self.page_view.canvas
         c.tag_bind(self._move_handle_id, '<Button-1>', self._on_move_bar_down)
         c.tag_bind(self._move_handle_id, '<B1-Motion>', self._on_move_bar_drag)
@@ -214,9 +220,7 @@ class TextTool:
         c1x, c1y = self.page_view.page_to_canvas(x1, y1)
         cvs = self.page_view.canvas
         cvs.coords(self._rect_id, c0x, c0y, c1x, c1y)
-        # Barra movimiento (arriba dentro del rect)
         cvs.coords(self._move_handle_id, c0x+1, c0y+1, c1x-1, c0y+1+_MOVE_BAR_H)
-        # Handles esquinas
         hs = _HANDLE_SIZE
         handles_pos = [
             (c0x-hs, c0y-hs, c0x+hs, c0y+hs),
@@ -226,16 +230,14 @@ class TextTool:
         ]
         for hid, pos in zip(self._handle_ids, handles_pos):
             cvs.coords(hid, *pos)
-        # Text widget (debajo de barra + padding)
         pad = 4
         text_top = c0y + _MOVE_BAR_H + pad
         cvs.coords(self._text_window_id, c0x+pad, text_top)
-        width_px = max(10, (c1x - c0x) - 2*pad)
-        height_px = max(10, (c1y - text_top) - pad)
-        if self._text_widget:
-            chars = max(5, int(width_px / 7))
-            lines = max(1, int(height_px / 18))
-            self._text_widget.config(width=chars, height=lines)
+        width_px = max(8, (c1x - c0x) - 2*pad)
+        height_px = max(8, (c1y - text_top) - pad)
+        if self._text_window_id:
+            # Ajuste exacto por píxeles del contenedor; evita “rebosar” lateral
+            cvs.itemconfig(self._text_window_id, width=width_px, height=height_px)
 
     def _destroy_overlay(self):
         if self._rect_id:
@@ -340,10 +342,11 @@ class TextTool:
         if not content:
             self._destroy_overlay()
             return
-        fontname, size, color_rgb, erase_bg = self.get_style()
+        fontname, size, color_rgb, erase_bg, underline, underline_color = self.get_style()
         r,g,b = color_rgb
+        ur,ug,ub = underline_color
         x0,y0,x1,y1 = self._page_rect
-        self.doc.add_text_box(
+        ok = self.doc.add_text_box(
             self.page_view.current_index,
             (x0,y0,x1,y1),
             content,
@@ -351,7 +354,34 @@ class TextTool:
             color=(r/255.0,g/255.0,b/255.0),
             font_family=fontname,
             align=0,
-            erase_background=erase_bg
+            erase_background=erase_bg,
+            underline=underline,
+            underline_color=(ur/255.0, ug/255.0, ub/255.0)
         )
         self._destroy_overlay()
-        self.notify_refresh()
+        if ok:
+            self.notify_refresh()
+
+    def refresh_style(self):
+        """
+        Actualiza estilo del overlay en vivo si se está editando.
+        """
+        if not (self._editing and self._text_widget):
+            return
+        fontname, size, color_rgb, erase_bg, underline, underline_color = self.get_style()
+        tk_family = 'Helvetica'
+        if fontname.startswith('times'): tk_family = 'Times'
+        elif fontname.startswith('cour'): tk_family = 'Courier'
+        weight = 'bold' if 'bold' in fontname else 'normal'
+        slant = 'italic' if ('italic' in fontname or 'oblique' in fontname) else 'roman'
+        tkfont_obj = tkfont.Font(family=tk_family, size=size, weight=weight, slant=slant)
+        self._text_widget.configure(font=tkfont_obj)
+        r,g,b = color_rgb
+        self._text_widget.configure(fg=f'#{r:02x}{g:02x}{b:02x}',
+                                    bg=('white' if erase_bg else self.page_view.canvas['bg']))
+        # limpiar / aplicar subrayado
+        if 'ul' in self._text_widget.tag_names():
+            self._text_widget.tag_delete('ul')
+        if underline:
+            self._text_widget.tag_configure('ul', underline=1)
+            self._text_widget.tag_add('ul','1.0','end')
