@@ -44,6 +44,12 @@ class TextTool:
         if self.page_view.current_index is None:
             return
 
+        # Si el canvas se re-renderizó y borró los items, limpiar estado obsoleto
+        if self._rect_id:
+            coords = self.page_view.canvas.coords(self._rect_id)
+            if len(coords) != 4:
+                self._destroy_overlay()
+
         cx = self.page_view.canvas.canvasx(event.x)
         cy = self.page_view.canvas.canvasy(event.y)
 
@@ -140,7 +146,12 @@ class TextTool:
             self._resizing_handle_index = None
 
     def on_page_rendered(self):
-        # Reposicionar overlay si se está editando
+        # Si los items desaparecieron (canvas borrado) cancelamos overlay inválido
+        if self._rect_id:
+            coords = self.page_view.canvas.coords(self._rect_id)
+            if len(coords) != 4:
+                self._destroy_overlay()
+                return
         if self._editing and self._page_rect:
             self._reposition_overlay()
 
@@ -273,12 +284,12 @@ class TextTool:
         return None
 
     def _hit_inside_rect(self, cx: float, cy: float):
-        """
-        True si el punto canvas está dentro del rect principal (excluyendo handles).
-        """
         if not self._rect_id:
             return False
-        x0,y0,x1,y1 = self.page_view.canvas.coords(self._rect_id)
+        coords = self.page_view.canvas.coords(self._rect_id)
+        if len(coords) != 4:
+            return False
+        x0,y0,x1,y1 = coords
         return x0 <= cx <= x1 and y0 <= cy <= y1
 
     # ----- Movimiento con barra -----
@@ -339,25 +350,43 @@ class TextTool:
         if not (self._editing and self._page_rect and self._text_widget):
             return
         content = self._text_widget.get('1.0', 'end').rstrip()
-        if not content:
+        fontname, size, color_rgb, erase_bg, underline, underline_color = self.get_style()
+        # Si no hay contenido pero sí borrar fondo: permitir que se aplique para “tapar”
+        if not content and not erase_bg:
             self._destroy_overlay()
             return
-        fontname, size, color_rgb, erase_bg, underline, underline_color = self.get_style()
         r,g,b = color_rgb
         ur,ug,ub = underline_color
         x0,y0,x1,y1 = self._page_rect
-        ok = self.doc.add_text_box(
-            self.page_view.current_index,
-            (x0,y0,x1,y1),
-            content,
-            font_size=size,
-            color=(r/255.0,g/255.0,b/255.0),
-            font_family=fontname,
-            align=0,
-            erase_background=erase_bg,
-            underline=underline,
-            underline_color=(ur/255.0, ug/255.0, ub/255.0)
-        )
+        try:
+            ok = self.doc.add_text_box(
+                self.page_view.current_index,
+                (x0,y0,x1,y1),
+                content if content else " ",  # espacio para forzar stream y luego visual casi vacío
+                font_size=size,
+                color=(r/255.0,g/255.0,b/255.0),
+                font_family=fontname,
+                align=0,
+                erase_background=erase_bg,
+                underline=underline,
+                underline_color=(ur/255.0, ug/255.0, ub/255.0)
+            )
+        except Exception:
+            try:
+                ok = self.doc.add_text_box(
+                    self.page_view.current_index,
+                    (x0,y0,x1,y1),
+                    content if content else " ",
+                    font_size=size,
+                    color=(r/255.0,g/255.0,b/255.0),
+                    font_family='helv',
+                    align=0,
+                    erase_background=erase_bg,
+                    underline=underline,
+                    underline_color=(ur/255.0, ug/255.0, ub/255.0)
+                )
+            except:
+                ok = False
         self._destroy_overlay()
         if ok:
             self.notify_refresh()
@@ -369,9 +398,12 @@ class TextTool:
         if not (self._editing and self._text_widget):
             return
         fontname, size, color_rgb, erase_bg, underline, underline_color = self.get_style()
-        tk_family = 'Helvetica'
-        if fontname.startswith('times'): tk_family = 'Times'
-        elif fontname.startswith('cour'): tk_family = 'Courier'
+        # Para mostrar en Tk: si es personalizada, usar su display (aprox) => intentar family real si existe
+        tk_family = self.page_view.canvas.winfo_toplevel().tk.call("font", "actual", "TkDefaultFont", "-family")
+        for known in ('Helvetica','Times','Courier','Arial'):
+            if known.lower() in fontname.lower():
+                tk_family = known
+                break
         weight = 'bold' if 'bold' in fontname else 'normal'
         slant = 'italic' if ('italic' in fontname or 'oblique' in fontname) else 'roman'
         tkfont_obj = tkfont.Font(family=tk_family, size=size, weight=weight, slant=slant)

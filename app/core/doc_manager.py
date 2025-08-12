@@ -2,6 +2,7 @@ from typing import List, Optional
 import io
 import pikepdf
 import fitz  # PyMuPDF
+from .font_manager import FontManager
 
 class DocumentManager:
     def __init__(self):
@@ -9,6 +10,8 @@ class DocumentManager:
         self._fitz_doc: Optional[fitz.Document] = None
         self.path: Optional[str] = None
         self.dirty: bool = False
+        self._history = None  # HistoryManager opcional
+        self._font_manager: Optional[FontManager] = None
 
     def open(self, path: str):
         self.close()
@@ -16,6 +19,9 @@ class DocumentManager:
         self._fitz_doc = fitz.open(path)
         self.path = path
         self.dirty = False
+        self._notify_history(initial=True)
+        if self._font_manager:
+            self._register_external_fonts()
 
     def is_open(self) -> bool:
         return self._pike_doc is not None
@@ -43,6 +49,7 @@ class DocumentManager:
         self._fitz_doc.close()
         self._fitz_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
         self.dirty = True
+        self._notify_history()
 
     def insert_pdf(self, other_path: str):
         if not self._pike_doc or not self._fitz_doc:
@@ -59,6 +66,7 @@ class DocumentManager:
         self._fitz_doc.close()
         self._fitz_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
         self.dirty = True
+        self._notify_history()
 
     def reorder_pages(self, new_order: List[int]):
         if not self._pike_doc or not self._fitz_doc:
@@ -76,6 +84,7 @@ class DocumentManager:
         self._fitz_doc.close()
         self._fitz_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
         self.dirty = True
+        self._notify_history()
 
     def save_as(self, path: str):
         if not self._pike_doc:
@@ -117,6 +126,7 @@ class DocumentManager:
         self._fitz_doc.close()
         self._fitz_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
         self.dirty = True
+        self._notify_history()
 
     def _rebuild_fitz(self):
         if not self._pike_doc:
@@ -128,6 +138,7 @@ class DocumentManager:
             self._fitz_doc.close()
         self._fitz_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
         self.dirty = True
+        self._notify_history()
 
     def insert_blank_page(self, position: int, width: int = 595, height: int = 842):
         if not self._pike_doc:
@@ -137,7 +148,7 @@ class DocumentManager:
         if position < 0 or position > len(self._pike_doc.pages):
             position = len(self._pike_doc.pages)
         self._pike_doc.pages.insert(position, blank)
-        self._rebuild_fitz()
+        self._rebuild_fitz()  # ya notifica
 
     def duplicate_page(self, index: int):
         if not self._pike_doc:
@@ -192,6 +203,8 @@ class DocumentManager:
                 pass
         self._fitz_doc = fitz.open(stream=data, filetype="pdf")
         self.dirty = True
+        if self._font_manager:
+            self._register_external_fonts()
 
     def add_text(self, page_index: int, x: float, y: float, text: str,
                  font_size: int = 14, color=(0, 0, 0), font_family: str = "helv") -> bool:
@@ -211,6 +224,7 @@ class DocumentManager:
         self._fitz_doc.save(buf)
         buf.seek(0)
         self._sync_from_fitz_bytes(buf)
+        self._notify_history()
         return True
 
     def draw_filled_rect(self, page_index: int, rect, fill=(1,1,1)):
@@ -232,6 +246,7 @@ class DocumentManager:
         self._fitz_doc.save(buf)
         buf.seek(0)
         self._sync_from_fitz_bytes(buf)
+        self._notify_history()
         return True
 
     def add_text_box(self, page_index: int, rect, text: str,
@@ -263,45 +278,76 @@ class DocumentManager:
             return False
         if erase_background:
             page.draw_rect(fitz.Rect(x0,y0,x1,y1), color=None, fill=(1,1,1))
-        leftover = page.insert_textbox(
-            fitz.Rect(x0, y0, x1, y1),
-            text,
-            fontsize=font_size,
-            fontname=font_family,
-            fill=color,
-            align=align
-        )
-        placed_with_box = (leftover != text)
-        # Fallback: si nada cupo, escribir línea a línea simple
-        if not placed_with_box:
-            # Insertar cada línea iniciando en la parte superior
+
+        # Preparar fontfile si es personalizada
+        fontfile = None
+        if not self._is_base14(font_family):
+            fontfile = self._fontfile_for(font_family)
+            if fontfile is None:
+                font_family = 'helv'  # fallback seguro
+
+        def _insert_box(fam, ffile):
+            return page.insert_textbox(
+                fitz.Rect(x0, y0, x1, y1),
+                text,
+                fontsize=font_size,
+                fontname=fam,
+                fontfile=ffile,
+                fill=color,
+                align=align
+            )
+
+        try:
+            leftover = _insert_box(font_family, fontfile)
+        except Exception:
+            # fallback duro
+            font_family = 'helv'
+            leftover = _insert_box('helv', None)
+
+        placed_with_box = (text.strip() != "")
+        if leftover == text and text.strip():
+            # El textbox no pudo colocar nada; fallback línea a línea
+            lines = text.splitlines()
             cur_y = y0 + font_size
             line_gap = font_size * 1.15
-            for line in text.splitlines():
-                if not line.strip():
+            for line in lines:
+                if cur_y > y1: break
+                if not line and len(lines) > 1:
                     cur_y += line_gap
                     continue
-                if cur_y > y1:
-                    break
-                page.insert_text(
-                    fitz.Point(x0, cur_y),
-                    line,
-                    fontsize=font_size,
-                    fontname=font_family,
-                    fill=color
-                )
+                try:
+                    page.insert_text(
+                        fitz.Point(x0, cur_y),
+                        line if line else " ",
+                        fontsize=font_size,
+                        fontname=font_family,
+                        fontfile=fontfile if fontfile and font_family != 'helv' else None,
+                        fill=color
+                    )
+                except Exception:
+                    page.insert_text(
+                        fitz.Point(x0, cur_y),
+                        line if line else " ",
+                        fontsize=font_size,
+                        fontname='helv',
+                        fill=color
+                    )
                 cur_y += line_gap
-            placed_with_box = True
-        if placed_with_box and underline:
+
+        if underline and text.strip():
             uy = y1 - 2
             page.draw_line(fitz.Point(x0 + 2, uy), fitz.Point(x1 - 2, uy),
                            color=underline_color, width=0.8)
-        if placed_with_box:
+
+        # Guardar siempre que haya borrado fondo o texto (para que se vea la acción)
+        if erase_background or text.strip():
             buf = io.BytesIO()
             self._fitz_doc.save(buf)
             buf.seek(0)
             self._sync_from_fitz_bytes(buf)
-        return placed_with_box
+            self._notify_history()
+            return True
+        return False
 
     def redact_rect(self, page_index: int, rect, fill=(1,1,1)):
         if not self._fitz_doc or not self._pike_doc:
@@ -318,6 +364,7 @@ class DocumentManager:
         self._fitz_doc.save(buf)
         buf.seek(0)
         self._sync_from_fitz_bytes(buf)
+        self._notify_history()
         return True
 
     def add_text_annotation(self, page_index: int, rect, text: str,
@@ -350,6 +397,7 @@ class DocumentManager:
         self._fitz_doc.save(buf)
         buf.seek(0)
         self._sync_from_fitz_bytes(buf)
+        self._notify_history()
         return annot.xref
 
     def list_text_annotations(self, page_index: int):
@@ -401,6 +449,7 @@ class DocumentManager:
         self._fitz_doc.save(buf)
         buf.seek(0)
         self._sync_from_fitz_bytes(buf)
+        self._notify_history()
         return info_changed
 
     def delete_annotation(self, page_index: int, xref: int):
@@ -415,6 +464,7 @@ class DocumentManager:
         self._fitz_doc.save(buf)
         buf.seek(0)
         self._sync_from_fitz_bytes(buf)
+        self._notify_history()
         return True
 
     def add_highlight_rect(self, page_index: int, rect, color_rgb=(255,255,0), opacity: float = 0.35) -> bool:
@@ -445,4 +495,68 @@ class DocumentManager:
         self._fitz_doc.save(buf)
         buf.seek(0)
         self._sync_from_fitz_bytes(buf)
+        self._notify_history()
         return True
+
+    def set_history(self, history):
+        self._history = history
+
+    def get_pdf_bytes(self) -> bytes:
+        if not self._pike_doc:
+            return b""
+        buf = io.BytesIO()
+        self._pike_doc.save(buf)
+        return buf.getvalue()
+
+    def load_from_bytes(self, data: bytes):
+        """Carga estado (para undo/redo) sin registrar nuevo snapshot."""
+        self.close()
+        self._pike_doc = pikepdf.Pdf.open(io.BytesIO(data))
+        self._fitz_doc = fitz.open(stream=data, filetype="pdf")
+        self.dirty = True  # estado modificado
+        if self._font_manager:
+            self._register_external_fonts()
+
+    def _notify_history(self, initial=False):
+        if not self._history:
+            return
+        data = self.get_pdf_bytes()
+        if initial and not data:
+            return
+        if initial and self._history:
+            self._history.reset_with(data)
+        else:
+            self._history.push(data)
+
+    def set_font_manager(self, font_manager: FontManager):
+        """
+        Asigna font manager. Si ya hay documento abierto registra las fuentes.
+        """
+        self._font_manager = font_manager
+        if self._fitz_doc and font_manager:
+            self._register_external_fonts()
+
+    def _register_external_fonts(self):
+        if not (self._fitz_doc and self._font_manager):
+            return
+        for f in self._font_manager.iter_fonts():
+            try:
+                self._fitz_doc.insert_font(fontname=f.font_name, fontfile=f.path)
+            except Exception:
+                pass
+
+    def _is_base14(self, name: str) -> bool:
+        return name in {
+            'helv','helvb','helvi','helvbi',
+            'times','timesb','timesi','timesbi',
+            'cour','courb','couri','courbi',
+            'symbol','zapfdingbats'
+        }
+
+    def _fontfile_for(self, internal_name: str) -> Optional[str]:
+        if not self._font_manager:
+            return None
+        for f in self._font_manager.iter_fonts():
+            if f.font_name == internal_name:
+                return f.path
+        return None

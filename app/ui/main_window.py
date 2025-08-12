@@ -2,11 +2,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, colorchooser
 from .thumbnail_panel import ThumbnailPanel
 from ..core.doc_manager import DocumentManager
+from ..core.history import HistoryManager
 from .page_view import PageView
 from .menus import MenusBuilder
 from .tools.text_tool import TextTool
 from .tools.highlight_tool import HighlightTool
 import tkinter.font as tkfont
+from ..core.font_manager import FontManager
+import os
 
 class MainWindow(tk.Frame):
     """
@@ -16,6 +19,8 @@ class MainWindow(tk.Frame):
         super().__init__(master)
         self.master = master
         self.doc = DocumentManager()
+        self.history = HistoryManager(limit=40)
+        self.doc.set_history(self.history)
         self.pack(fill='both', expand=True)
 
         self.rowconfigure(1, weight=1)
@@ -40,6 +45,13 @@ class MainWindow(tk.Frame):
         # Highlight estado
         self.highlight_color_rgb = (255, 255, 0)
         self.highlight_opacity = tk.DoubleVar(value=0.35)
+
+        # Font manager: cargar fuentes externas (directorio fonts/ si existe)
+        self.font_manager = FontManager()
+        fonts_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'fonts')
+        if os.path.isdir(fonts_dir):
+            self.font_manager.load_dir(fonts_dir)
+        self.doc.set_font_manager(self.font_manager)
 
         # Tools
         self.text_tool = TextTool(self.page_view, self.doc,
@@ -67,7 +79,8 @@ class MainWindow(tk.Frame):
             lambda: self._zoom_btn(1.25), lambda: self._zoom_btn(0.8),
             self._zoom_reset, self._fit_width,
             lambda: self._rotate(90), lambda: self._rotate(-90),
-            lambda: self._move_page(-1), lambda: self._move_page(1)
+            lambda: self._move_page(-1), lambda: self._move_page(1),
+            self._undo_action, self._redo_action
         )
 
         # Wheel
@@ -112,8 +125,11 @@ class MainWindow(tk.Frame):
             self.text_tool.refresh_style()
 
         tk.Label(group_text, text='Fuente:').pack(side='left')
-        tk.OptionMenu(group_text, self.font_family_var, 'Helvetica','Times','Courier',
-                      command=lambda *_: style_changed()).pack(side='left')
+        font_items = ['Helvetica','Times','Courier'] + self.font_manager.list_display_names()
+        self.font_family_var.set(font_items[0])
+        font_menu = tk.OptionMenu(group_text, self.font_family_var, *font_items,
+                                  command=lambda *_: style_changed())
+        font_menu.pack(side='left')
         tk.Label(group_text, text='Tam:').pack(side='left')
         tk.Spinbox(group_text, from_=6, to=200, width=4, textvariable=self.font_size_var,
                    command=style_changed).pack(side='left')
@@ -333,23 +349,33 @@ class MainWindow(tk.Frame):
     # ---------- Text style collection ----------
     def _collect_text_style(self):
         base_map = {'Helvetica':'helv','Times':'times','Courier':'cour'}
-        base = base_map.get(self.font_family_var.get(),'helv')
-        bold = self.bold_var.get()
-        italic = self.italic_var.get()
-        style = ''
-        if base == 'helv':
-            if bold and italic: style='-boldoblique'
-            elif bold: style='-bold'
-            elif italic: style='-oblique'
-        elif base == 'times':
-            if bold and italic: style='-bolditalic'
-            elif bold: style='-bold'
-            elif italic: style='-italic'
-        elif base == 'cour':
-            if bold and italic: style='-boldoblique'
-            elif bold: style='-bold'
-            elif italic: style='-oblique'
-        fontname = base + style
+        selected = self.font_family_var.get()
+        # ¿Es fuente personalizada?
+        fdef = self.font_manager.find_by_display(selected)
+        if fdef:
+            # Se usa tal cual el nombre interno insertado en fitz
+            fontname = fdef.font_name
+        else:
+            base = base_map.get(selected,'helv')
+            bold = self.bold_var.get()
+            italic = self.italic_var.get()
+            if base == 'helv':
+                if bold and italic: fontname = 'helvbi'
+                elif bold: fontname = 'helvb'
+                elif italic: fontname = 'helvi'
+                else: fontname = 'helv'
+            elif base == 'times':
+                if bold and italic: fontname = 'timesbi'
+                elif bold: fontname = 'timesb'
+                elif italic: fontname = 'timesi'
+                else: fontname = 'times'
+            elif base == 'cour':
+                if bold and italic: fontname = 'courbi'
+                elif bold: fontname = 'courb'
+                elif italic: fontname = 'couri'
+                else: fontname = 'cour'
+            else:
+                fontname = 'helv'
         return (fontname,
                 self.font_size_var.get(),
                 self.color_rgb,
@@ -386,3 +412,15 @@ class MainWindow(tk.Frame):
 
     def _collect_highlight_style(self):
         return (self.highlight_color_rgb, self.highlight_opacity.get())
+
+    def _undo_action(self, event=None):
+        if self.history.can_undo():
+            data = self.history.undo()
+            self.doc.load_from_bytes(data)
+            self._after_doc_change()
+
+    def _redo_action(self, event=None):
+        if self.history.can_redo():
+            data = self.history.redo()
+            self.doc.load_from_bytes(data)
+            self._after_doc_change()
