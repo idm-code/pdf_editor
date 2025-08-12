@@ -104,6 +104,13 @@ class PageView(tk.Frame):
         ox, oy = self.last_offsets
         return (cx - ox)/self.last_zoom_used, (cy - oy)/self.last_zoom_used
 
+    def page_to_canvas(self, px, py):
+        """
+        Convierte coords de página -> canvas usando último render.
+        """
+        ox, oy = self.last_offsets
+        return px * self.last_zoom_used + ox, py * self.last_zoom_used + oy
+
     def _maybe_refit(self):
         if self.zoom_mode == 'fit_width' and self.current_index is not None:
             self.render()
