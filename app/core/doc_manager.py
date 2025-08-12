@@ -113,20 +113,30 @@ class DocumentManager:
         self.dirty = False
 
     def rotate_page(self, index: int, degrees: int):
-        if not self._pike_doc or not self._fitz_doc:
+        """
+        Rota la página (múltiplos de 90). Usa asignación directa del entero (pikepdf acepta int).
+        Elimina /Rotate si el resultado es 0 para mantener limpio el diccionario.
+        """
+        if not self._pike_doc:
+            return
+        if index < 0 or index >= len(self._pike_doc.pages):
             return
         page = self._pike_doc.pages[index]
-        current = int(page.obj.get('/Rotate', 0))
+        page_obj = page.obj
+        try:
+            current = int(page_obj.get('/Rotate', 0))
+        except Exception:
+            current = 0
+        # Normalizar a múltiplos de 90
+        if degrees % 90 != 0:
+            degrees = round(degrees / 90) * 90
         new = (current + degrees) % 360
-        page.obj['/Rotate'] = pikepdf.Number(new)
-        # Rebuild fitz doc
-        buf = io.BytesIO()
-        self._pike_doc.save(buf)
-        buf.seek(0)
-        self._fitz_doc.close()
-        self._fitz_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
-        self.dirty = True
-        self._notify_history()
+        if new == 0 and '/Rotate' in page_obj:
+            del page_obj['/Rotate']
+        else:
+            page_obj['/Rotate'] = new
+        # Rebuild fitz y registrar historial
+        self._rebuild_fitz()
 
     def _rebuild_fitz(self):
         if not self._pike_doc:
