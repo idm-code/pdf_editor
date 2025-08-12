@@ -50,6 +50,16 @@ class MainWindow(tk.Frame):
         # Font manager: cargar fuentes externas (directorio fonts/ si existe)
         self.font_manager = FontManager()
         fonts_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'fonts')
+        # Intentar ruta empaquetada (PyInstaller)
+        if not os.path.isdir(fonts_dir):
+            try:
+                import sys
+                if hasattr(sys, "_MEIPASS"):
+                    alt = os.path.join(sys._MEIPASS, 'app', 'fonts')  # type: ignore
+                    if os.path.isdir(alt):
+                        fonts_dir = alt
+            except Exception:
+                pass
         if os.path.isdir(fonts_dir):
             self.font_manager.load_dir(fonts_dir)
         self.doc.set_font_manager(self.font_manager)
